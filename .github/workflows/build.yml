@@ -1,0 +1,125 @@
+name: Build and Publish Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream release tag to build (blank = latest)'
+        required: false
+      force:
+        description: 'Rebuild even if image tag already exists in GHCR'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 6 * * *'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/mcpproxy
+  UPSTREAM_REPO: smart-mcp-proxy/mcpproxy-go
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Determine upstream release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG=$(gh release view --repo "$UPSTREAM_REPO" --json tagName -q .tagName)
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved upstream tag: $TAG (version: $VERSION)"
+
+      - name: Log into ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if image tag already exists
+        id: check
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [ "$FORCE" = "true" ]; then
+            echo "Force rebuild requested."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          elif docker manifest inspect "$IMAGE_REF" >/dev/null 2>&1; then
+            echo "Image already published: $IMAGE_REF"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Image not yet published: $IMAGE_REF"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout upstream at tag
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ steps.tag.outputs.tag }}
+          path: source
+
+      - name: Resolve upstream build metadata
+        if: steps.check.outputs.exists == 'false'
+        id: src
+        run: |
+          set -euo pipefail
+          # Mirror upstream's build-docker job: feed the same VERSION/COMMIT/BUILD_DATE
+          # into the Dockerfile, resolved from the exact upstream tag commit.
+          COMMIT=$(git -C source rev-parse HEAD)
+          BUILD_DATE=$(git -C source log -1 --format=%cI)
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
+          echo "Commit: $COMMIT  Build date: $BUILD_DATE"
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        if: steps.check.outputs.exists == 'false'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=match,pattern=v(\d+),group=1,value=${{ steps.tag.outputs.tag }}
+            type=match,pattern=v(\d+\.\d+),group=1,value=${{ steps.tag.outputs.tag }}
+            type=match,pattern=v(\d+\.\d+\.\d+),group=1,value=${{ steps.tag.outputs.tag }}
+
+      - name: Build and push
+        if: steps.check.outputs.exists == 'false'
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: source
+          file: source/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.tag.outputs.tag }}
+            COMMIT=${{ steps.src.outputs.commit }}
+            BUILD_DATE=${{ steps.src.outputs.build_date }}
+          platforms: linux/amd64
+
+      - name: Image digest
+        if: steps.check.outputs.exists == 'false'
+        run: echo "Pushed digest ${{ steps.build.outputs.digest }}"
