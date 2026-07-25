@@ -95,6 +95,12 @@ jobs:
           # Upstream pins golang:1.24-alpine but their go.mod requires a newer Go.
           sed -i '/^FROM golang.*AS builder/a ENV GOTOOLCHAIN=auto' source/Dockerfile
           grep -n 'GOTOOLCHAIN' source/Dockerfile
+          # Build the personal edition (no SSO login wall).
+          sed -i '/^\s*-tags server \\$/d' source/Dockerfile
+          if grep -q -- '-tags server' source/Dockerfile; then
+            echo 'ERROR: failed to strip -tags server from upstream Dockerfile' >&2
+            exit 1
+          fi
 
       - name: Set up Docker Buildx
         if: steps.check.outputs.exists == 'false'

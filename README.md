@@ -81,6 +81,8 @@ A GitHub Actions workflow runs daily at 06:00 UTC. It checks the latest release 
 
 Right now only `linux/amd64` is built.
 
+Unlike upstream's Dockerfile, the binary is built **without** the `server` build tag (the multi-user/SSO edition). The server edition's web UI forces an SSO login page whenever `server_edition` isn't configured, which breaks plain API-key deployments. The personal edition built here has no such mode.
+
 ## Manual builds
 
 You can trigger a build from the Actions tab. There are two optional inputs:
